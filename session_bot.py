@@ -105,7 +105,7 @@ class SessionBot:
         
         try:
             # Используем универсальные API данные
-            client = TelegramClient(StringSession(), 2040, "b18441a1ff607e10a989891a5462e627")
+            client = TelegramClient(StringSession(), 6, "eb06d4abfb49dc3eeb1aeb98ae0f581e")
             await client.connect()
             
             sent_code = await client.send_code_request(phone)
