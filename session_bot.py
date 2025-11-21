@@ -1,6 +1,6 @@
 import os
 import logging
-import psycopg2
+import sqlite3
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telethon import TelegramClient
@@ -11,27 +11,49 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def get_db_connection():
-    """Получаем соединение с PostgreSQL"""
+    """Получаем соединение с базой данных"""
     database_url = os.getenv('DATABASE_URL')
-    return psycopg2.connect(database_url, sslmode='require')
+    
+    if database_url and database_url.startswith('postgresql://'):
+        # Используем PostgreSQL если доступен
+        import psycopg2
+        return psycopg2.connect(database_url, sslmode='require')
+    else:
+        # Используем SQLite как запасной вариант
+        return sqlite3.connect('sessions.db')
 
 def init_db():
-    """Инициализация таблиц в PostgreSQL"""
+    """Инициализация таблиц"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS sessions (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            phone TEXT,
-            session_string TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_user_phone 
-        ON sessions (user_id, phone)
-    ''')
+    
+    if isinstance(conn, sqlite3.Connection):
+        # SQLite
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                user_id INTEGER,
+                phone TEXT,
+                session_string TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, phone)
+            )
+        ''')
+    else:
+        # PostgreSQL
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                phone TEXT,
+                session_string TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_phone 
+            ON sessions (user_id, phone)
+        ''')
+    
     conn.commit()
     conn.close()
 
@@ -67,7 +89,12 @@ class SessionBot:
         
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM sessions WHERE user_id = %s', (user_id,))
+        
+        if isinstance(conn, sqlite3.Connection):
+            cursor.execute('SELECT COUNT(*) FROM sessions WHERE user_id = ?', (user_id,))
+        else:
+            cursor.execute('SELECT COUNT(*) FROM sessions WHERE user_id = %s', (user_id,))
+            
         session_count = cursor.fetchone()[0]
         conn.close()
         
@@ -167,10 +194,18 @@ class SessionBot:
         
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            'INSERT INTO sessions (user_id, phone, session_string) VALUES (%s, %s, %s)',
-            (user_id, phone, session_string)
-        )
+        
+        if isinstance(conn, sqlite3.Connection):
+            cursor.execute(
+                'INSERT OR REPLACE INTO sessions (user_id, phone, session_string) VALUES (?, ?, ?)',
+                (user_id, phone, session_string)
+            )
+        else:
+            cursor.execute(
+                'INSERT INTO sessions (user_id, phone, session_string) VALUES (%s, %s, %s)',
+                (user_id, phone, session_string)
+            )
+            
         conn.commit()
         conn.close()
         
@@ -192,9 +227,16 @@ class SessionBot:
         
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            'SELECT phone, session_string FROM sessions WHERE user_id = %s', (user_id,)
-        )
+        
+        if isinstance(conn, sqlite3.Connection):
+            cursor.execute(
+                'SELECT phone, session_string FROM sessions WHERE user_id = ?', (user_id,)
+            )
+        else:
+            cursor.execute(
+                'SELECT phone, session_string FROM sessions WHERE user_id = %s', (user_id,)
+            )
+            
         sessions = cursor.fetchall()
         conn.close()
         
@@ -214,7 +256,12 @@ class SessionBot:
         
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id, phone FROM sessions WHERE user_id = %s', (user_id,))
+        
+        if isinstance(conn, sqlite3.Connection):
+            cursor.execute('SELECT phone FROM sessions WHERE user_id = ?', (user_id,))
+        else:
+            cursor.execute('SELECT phone FROM sessions WHERE user_id = %s', (user_id,))
+            
         sessions = cursor.fetchall()
         conn.close()
         
@@ -223,12 +270,12 @@ class SessionBot:
             return
         
         response = "🗑️ **Выбери сессию для удаления:**\n\n"
-        for i, (session_id, phone) in enumerate(sessions, 1):
+        for i, (phone,) in enumerate(sessions, 1):
             response += f"{i}. {phone}\n"
         
         await update.message.reply_text(response)
         context.user_data['state'] = 'awaiting_delete'
-        context.user_data['sessions_list'] = sessions
+        context.user_data['sessions_list'] = [phone for phone, in sessions]
 
     async def process_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE, choice: str):
         if not choice.isdigit():
@@ -242,15 +289,26 @@ class SessionBot:
             await update.message.reply_text("❌ Неверный номер")
             return
         
-        session_id, phone = sessions_list[index]
+        phone_to_delete = sessions_list[index]
         
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM sessions WHERE id = %s', (session_id,))
+        
+        if isinstance(conn, sqlite3.Connection):
+            cursor.execute(
+                'DELETE FROM sessions WHERE user_id = ? AND phone = ?',
+                (update.effective_user.id, phone_to_delete)
+            )
+        else:
+            cursor.execute(
+                'DELETE FROM sessions WHERE user_id = %s AND phone = %s',
+                (update.effective_user.id, phone_to_delete)
+            )
+            
         conn.commit()
         conn.close()
         
-        await update.message.reply_text(f"✅ Сессия {phone} удалена")
+        await update.message.reply_text(f"✅ Сессия {phone_to_delete} удалена")
         context.user_data.pop('state', None)
         context.user_data.pop('sessions_list', None)
 
