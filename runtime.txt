@@ -1,0 +1,4 @@
+python-telegram-bot==20.7
+telethon==1.28.5
+psycopg2-binary==2.9.7
+python-dotenv==1.0.0
