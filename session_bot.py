@@ -1,68 +1,20 @@
 import os
 import logging
 import sqlite3
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-import asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-def get_db_connection():
-    """Получаем соединение с базой данных"""
-    database_url = os.getenv('DATABASE_URL')
-    
-    if database_url and database_url.startswith('postgresql://'):
-        # Используем PostgreSQL если доступен
-        import psycopg2
-        return psycopg2.connect(database_url, sslmode='require')
-    else:
-        # Используем SQLite как запасной вариант
-        return sqlite3.connect('sessions.db')
-
-def init_db():
-    """Инициализация таблиц"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    if isinstance(conn, sqlite3.Connection):
-        # SQLite
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sessions (
-                user_id INTEGER,
-                phone TEXT,
-                session_string TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, phone)
-            )
-        ''')
-    else:
-        # PostgreSQL
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sessions (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                phone TEXT,
-                session_string TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        cursor.execute('''
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_phone 
-            ON sessions (user_id, phone)
-        ''')
-    
-    conn.commit()
-    conn.close()
 
 class SessionBot:
     def __init__(self, token: str):
         self.token = token
         self.app = Application.builder().token(token).build()
         self.setup_handlers()
-        init_db()
 
     def setup_handlers(self):
         self.app.add_handler(CommandHandler("start", self.start))
@@ -79,22 +31,16 @@ class SessionBot:
 /newsession - Создать новую сессию
 /mysessions - Мои сессии  
 /delsession - Удалить сессию
-
-Просто нажми /newsession и следуй инструкциям!
         """
         await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
     async def new_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
-        conn = get_db_connection()
+        # Простая проверка количества сессий через SQLite
+        conn = sqlite3.connect('sessions.db')
         cursor = conn.cursor()
-        
-        if isinstance(conn, sqlite3.Connection):
-            cursor.execute('SELECT COUNT(*) FROM sessions WHERE user_id = ?', (user_id,))
-        else:
-            cursor.execute('SELECT COUNT(*) FROM sessions WHERE user_id = %s', (user_id,))
-            
+        cursor.execute('SELECT COUNT(*) FROM sessions WHERE user_id = ?', (user_id,))
         session_count = cursor.fetchone()[0]
         conn.close()
         
@@ -105,8 +51,7 @@ class SessionBot:
         await update.message.reply_text(
             "📱 **Создание новой сессии**\n\n"
             "Введите номер телефона в международном формате:\n"
-            "Пример: +77777777777\n\n"
-            "⚠️ Убедись, что у тебя есть доступ к этому номеру для получения кода!"
+            "Пример: +77777777777"
         )
         context.user_data['state'] = 'awaiting_phone'
 
@@ -131,7 +76,6 @@ class SessionBot:
         context.user_data['phone'] = phone
         
         try:
-            # Используем универсальные API данные
             client = TelegramClient(StringSession(), 6, "eb06d4abfb49dc3eeb1aeb98ae0f581e")
             await client.connect()
             
@@ -139,10 +83,7 @@ class SessionBot:
             context.user_data['phone_code_hash'] = sent_code.phone_code_hash
             context.user_data['client'] = client
             
-            await update.message.reply_text(
-                "✅ Код отправлен!\n\n"
-                "📨 Введите код из Telegram:"
-            )
+            await update.message.reply_text("✅ Код отправлен! Введите код из Telegram:")
             context.user_data['state'] = 'awaiting_code'
             
         except Exception as e:
@@ -166,10 +107,7 @@ class SessionBot:
         except Exception as e:
             error_msg = str(e)
             if "two-steps" in error_msg.lower():
-                await update.message.reply_text(
-                    "🔒 Включена двухфакторная аутентификация.\n"
-                    "Введите пароль:"
-                )
+                await update.message.reply_text("🔒 Введите пароль двухфакторной аутентификации:")
                 context.user_data['state'] = 'awaiting_password'
             else:
                 await update.message.reply_text(f"❌ Ошибка: {error_msg}")
@@ -188,32 +126,23 @@ class SessionBot:
             await client.disconnect()
 
     async def save_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE, client, phone: str):
-        """Сохраняет сессию в базу и отправляет пользователю"""
         session_string = client.session.save()
         user_id = update.effective_user.id
         
-        conn = get_db_connection()
+        # Сохраняем в SQLite
+        conn = sqlite3.connect('sessions.db')
         cursor = conn.cursor()
-        
-        if isinstance(conn, sqlite3.Connection):
-            cursor.execute(
-                'INSERT OR REPLACE INTO sessions (user_id, phone, session_string) VALUES (?, ?, ?)',
-                (user_id, phone, session_string)
-            )
-        else:
-            cursor.execute(
-                'INSERT INTO sessions (user_id, phone, session_string) VALUES (%s, %s, %s)',
-                (user_id, phone, session_string)
-            )
-            
+        cursor.execute(
+            'INSERT OR REPLACE INTO sessions (user_id, phone, session_string) VALUES (?, ?, ?)',
+            (user_id, phone, session_string)
+        )
         conn.commit()
         conn.close()
         
         await update.message.reply_text(
             f"✅ **Сессия создана!**\n\n"
             f"📱 Номер: `{phone}`\n"
-            f"🔐 Сессия: `{session_string}`\n\n"
-            f"Используй эту строку в боте мониторинга!",
+            f"🔐 Сессия: `{session_string}`",
             parse_mode='Markdown'
         )
         
@@ -225,18 +154,9 @@ class SessionBot:
     async def my_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
-        conn = get_db_connection()
+        conn = sqlite3.connect('sessions.db')
         cursor = conn.cursor()
-        
-        if isinstance(conn, sqlite3.Connection):
-            cursor.execute(
-                'SELECT phone, session_string FROM sessions WHERE user_id = ?', (user_id,)
-            )
-        else:
-            cursor.execute(
-                'SELECT phone, session_string FROM sessions WHERE user_id = %s', (user_id,)
-            )
-            
+        cursor.execute('SELECT phone, session_string FROM sessions WHERE user_id = ?', (user_id,))
         sessions = cursor.fetchall()
         conn.close()
         
@@ -254,14 +174,9 @@ class SessionBot:
     async def del_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
-        conn = get_db_connection()
+        conn = sqlite3.connect('sessions.db')
         cursor = conn.cursor()
-        
-        if isinstance(conn, sqlite3.Connection):
-            cursor.execute('SELECT phone FROM sessions WHERE user_id = ?', (user_id,))
-        else:
-            cursor.execute('SELECT phone FROM sessions WHERE user_id = %s', (user_id,))
-            
+        cursor.execute('SELECT phone FROM sessions WHERE user_id = ?', (user_id,))
         sessions = cursor.fetchall()
         conn.close()
         
@@ -291,20 +206,12 @@ class SessionBot:
         
         phone_to_delete = sessions_list[index]
         
-        conn = get_db_connection()
+        conn = sqlite3.connect('sessions.db')
         cursor = conn.cursor()
-        
-        if isinstance(conn, sqlite3.Connection):
-            cursor.execute(
-                'DELETE FROM sessions WHERE user_id = ? AND phone = ?',
-                (update.effective_user.id, phone_to_delete)
-            )
-        else:
-            cursor.execute(
-                'DELETE FROM sessions WHERE user_id = %s AND phone = %s',
-                (update.effective_user.id, phone_to_delete)
-            )
-            
+        cursor.execute(
+            'DELETE FROM sessions WHERE user_id = ? AND phone = ?',
+            (update.effective_user.id, phone_to_delete)
+        )
         conn.commit()
         conn.close()
         
@@ -313,4 +220,19 @@ class SessionBot:
         context.user_data.pop('sessions_list', None)
 
     def run(self):
+        # Инициализируем базу данных
+        conn = sqlite3.connect('sessions.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                user_id INTEGER,
+                phone TEXT,
+                session_string TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, phone)
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        
         self.app.run_polling(drop_pending_updates=True)
