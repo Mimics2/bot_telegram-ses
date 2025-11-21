@@ -21,7 +21,6 @@ def run_bot(bot_name, bot_runner):
         bot_runner()
     except Exception as e:
         logger.error(f"Error in {bot_name}: {e}")
-        # Перезапуск через 30 секунд
         import time
         time.sleep(30)
         run_bot(bot_name, bot_runner)
@@ -50,19 +49,21 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 if __name__ == "__main__":
-    # Регистрируем обработчики сигналов
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     logger.info("Starting Telegram Session Manager...")
     
-    # Проверяем обязательные переменные
-    required_vars = ['SESSION_BOT_TOKEN', 'MONITOR_BOT_TOKEN', 'DATABASE_URL']
+    # Проверяем только токены ботов, база данных опциональна
+    required_vars = ['SESSION_BOT_TOKEN', 'MONITOR_BOT_TOKEN']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
-        logger.error(f"Missing environment variables: {missing_vars}")
+        logger.error(f"Missing required environment variables: {missing_vars}")
         sys.exit(1)
+    
+    if not os.getenv('DATABASE_URL'):
+        logger.warning("DATABASE_URL not found, using SQLite as fallback")
     
     # Запускаем ботов в отдельных потоках
     t1 = Thread(target=lambda: run_bot("Session Bot", run_session_bot), daemon=True)
@@ -73,10 +74,8 @@ if __name__ == "__main__":
     
     logger.info("Both bots started successfully")
     
-    # Бесконечный цикл с проверкой состояния
     try:
         while True:
-            # Проверяем, живы ли потоки
             if not t1.is_alive():
                 logger.warning("Session Bot thread died, restarting...")
                 t1 = Thread(target=lambda: run_bot("Session Bot", run_session_bot), daemon=True)
@@ -87,7 +86,7 @@ if __name__ == "__main__":
                 t2 = Thread(target=lambda: run_bot("Monitor Bot", run_monitor_bot), daemon=True)
                 t2.start()
                 
-            asyncio.sleep(60)  # Проверяем каждые 60 секунд
+            asyncio.sleep(60)
             
     except KeyboardInterrupt:
         logger.info("Shutting down...")
