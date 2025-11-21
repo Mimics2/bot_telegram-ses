@@ -1,0 +1,13 @@
+[phases.setup]
+cmds = [
+    "apt-get update",
+    "apt-get install -y build-essential python3-dev libpq-dev"
+]
+
+[phases.install]
+cmds = [
+    "pip install -r requirements.txt"
+]
+
+[start]
+cmd = "python main.py"
