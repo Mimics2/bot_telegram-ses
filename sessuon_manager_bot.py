@@ -173,9 +173,9 @@ class SessionManagerBot:
         self.app.run_polling()
 
 # Замените на ваши данные от my.telegram.org
-YOUR_API_ID = 1234567
-YOUR_API_HASH = "your_api_hash_here"
+YOUR_API_ID =  34926321 
+YOUR_API_HASH = "3ce3de5ab33d2defac471e34d47662e2"
 
 if __name__ == "__main__":
-    bot = SessionManagerBot("YOUR_BOT_TOKEN_HERE")
+    bot = SessionManagerBot("8307838767:AAFTlaYRF12rPfitbVwDM0tsuZ4HApVykmE")
     bot.run()
